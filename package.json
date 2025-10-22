@@ -1,0 +1,14 @@
+{
+  "name": "oblsk_connector",
+  "version": "1.0.0",
+  "description": "Native MySQL Connector for Obelisk Framework",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.6.5"
+  },
+  "author": "Obelisk Framework",
+  "license": "MIT"
+}
