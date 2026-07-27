@@ -142,13 +142,77 @@ local function execute(query, params, callback)
         callback = params
         params = nil
     end
-    
+
     Citizen.CreateThread(function()
         local result = executeSync(query, params)
         if callback then
             callback(result)
         end
     end)
+end
+
+--- Run a batch of statements atomically on a single connection.
+--- Each entry may be a raw SQL string or { query = string, values = table }.
+--- Statements are interpolated with the same escaping as executeSync, then run
+--- inside a real BEGIN/COMMIT (ROLLBACK on error) server-side.
+--- @param queries table
+--- @return boolean success
+local function transactionSync(queries)
+    if type(queries) ~= 'table' or #queries == 0 then
+        return true
+    end
+
+    local statements = {}
+    for _, item in ipairs(queries) do
+        if type(item) == 'table' then
+            statements[#statements + 1] = parseQuery(item.query, item.values)
+        else
+            statements[#statements + 1] = tostring(item)
+        end
+    end
+
+    local result = {}
+    local requestDone = false
+
+    local payload = json.encode({
+        queries = statements,
+        host = MySQL.config.host,
+        port = MySQL.config.port,
+        user = MySQL.config.user,
+        password = MySQL.config.password,
+        database = MySQL.config.database
+    })
+
+    print('[oblsk_connector] Executing transaction: ' .. #statements .. ' statement(s)')
+
+    PerformHttpRequest('http://127.0.0.1:3000/transaction', function(statusCode, response, headers)
+        if statusCode == 200 then
+            local success, data = pcall(json.decode, response)
+            if success and data then
+                result = data
+            end
+        else
+            if statusCode ~= 0 then
+                print('[oblsk_connector] Transaction HTTP Error ' .. statusCode .. ': ' .. (response or 'No response'))
+            end
+        end
+        requestDone = true
+    end, 'POST', payload, {
+        ['Content-Type'] = 'application/json'
+    })
+
+    local timeout = 0
+    while not requestDone and timeout < 400 do
+        Citizen.Wait(10)
+        timeout = timeout + 1
+    end
+
+    if not requestDone then
+        print('[oblsk_connector] Warning: transaction HTTP request timed out after 4 seconds')
+        return false
+    end
+
+    return result.success == true
 end
 
 local function init()
@@ -174,5 +238,6 @@ end
 
 exports('executeSync', executeSync)
 exports('execute', execute)
+exports('transactionSync', transactionSync)
 
 init()

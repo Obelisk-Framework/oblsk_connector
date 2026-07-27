@@ -80,6 +80,63 @@ const server = http.createServer(async (req, res) => {
                 res.end(JSON.stringify({ error: error.message }));
             }
         });
+    } else if (req.method === 'POST' && req.url === '/transaction') {
+        let body = '';
+
+        req.on('data', chunk => {
+            body += chunk.toString();
+        });
+
+        req.on('end', async () => {
+            try {
+                const payload = JSON.parse(body);
+                const queries = payload.queries;
+                const host = payload.host || 'localhost';
+                const port = payload.port || 3306;
+                const user = payload.user || 'root';
+                const password = payload.password || '';
+                const database = payload.database || 'fivem';
+
+                if (!Array.isArray(queries) || queries.length === 0) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ success: false, error: 'No queries provided' }));
+                    return;
+                }
+
+                console.log('[Transaction]', queries.length, 'statement(s)');
+
+                const pool = await getPool({ host, port, user, password, database });
+                const connection = await pool.getConnection();
+
+                // All statements run on this single connection inside one
+                // transaction, so START TRANSACTION / COMMIT actually apply.
+                try {
+                    await connection.beginTransaction();
+                    for (const item of queries) {
+                        const sql = typeof item === 'string' ? item : item.query;
+                        await connection.query(sql);
+                    }
+                    await connection.commit();
+                    res.writeHead(200);
+                    res.end(JSON.stringify({ success: true }));
+                } catch (error) {
+                    try {
+                        await connection.rollback();
+                    } catch (rollbackError) {
+                        console.error('Rollback error:', rollbackError.message);
+                    }
+                    console.error('Transaction error:', error.message);
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ success: false, error: error.message }));
+                } finally {
+                    connection.release();
+                }
+            } catch (error) {
+                console.error('Transaction error:', error.message);
+                res.writeHead(500);
+                res.end(JSON.stringify({ success: false, error: error.message }));
+            }
+        });
     } else if (req.url === '/health') {
         res.writeHead(200);
         res.end(JSON.stringify({ status: 'ok' }));
