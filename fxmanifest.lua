@@ -9,7 +9,8 @@ lua54 'yes'
 
 exports {
     'executeSync',
-    'execute'
+    'execute',
+    'transactionSync'
 }
 
 server_scripts {
