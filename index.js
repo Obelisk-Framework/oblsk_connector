@@ -1,27 +1,47 @@
 const http = require('http');
 const mysql = require('mysql2/promise');
+const { Pool: PgPool } = require('pg');
 
 const PORT = process.env.MYSQL_SERVER_PORT || 3000;
 
 let pools = {};
 
-const getPool = async (config) => {
-    const key = `${config.host}:${config.port}:${config.user}:${config.database}`;
-    
+const getPool = async (driver, config) => {
+    const key = `${driver}:${config.host}:${config.port}:${config.user}:${config.database}`;
+
     if (!pools[key]) {
-        pools[key] = mysql.createPool({
-            host: config.host,
-            user: config.user,
-            password: config.password,
-            database: config.database,
-            port: config.port,
-            waitForConnections: true,
-            connectionLimit: 10,
-            queueLimit: 0
-        });
+        if (driver === 'postgres') {
+            pools[key] = new PgPool({
+                host: config.host,
+                user: config.user,
+                password: config.password,
+                database: config.database,
+                port: config.port,
+                max: 10
+            });
+        } else {
+            pools[key] = mysql.createPool({
+                host: config.host,
+                user: config.user,
+                password: config.password,
+                database: config.database,
+                port: config.port,
+                waitForConnections: true,
+                connectionLimit: 10,
+                queueLimit: 0
+            });
+        }
     }
-    
+
     return pools[key];
+};
+
+// Translate '?' positional placeholders (Lua/QueryBuilder's format) into
+// Postgres' '$1, $2, ...' — done here rather than in QueryBuilder so the
+// ORM stays dialect-agnostic on placeholder syntax.
+const toPositionalParams = (query) => {
+    let i = 0;
+    return query.replace(/\?/g, () => `$${++i}`);
 };
 
 const server = http.createServer(async (req, res) => {
@@ -38,8 +58,9 @@ const server = http.createServer(async (req, res) => {
             try {
                 const payload = JSON.parse(body);
                 const query = payload.query;
+                const driver = payload.driver || 'mysql';
                 const host = payload.host || 'localhost';
-                const port = payload.port || 3306;
+                const port = payload.port || (driver === 'postgres' ? 5432 : 3306);
                 const user = payload.user || 'root';
                 const password = payload.password || '';
                 const database = payload.database || 'fivem';
@@ -52,13 +73,35 @@ const server = http.createServer(async (req, res) => {
 
                 console.log('[Query]', query.substring(0, 100) + (query.length > 100 ? '...' : ''));
 
-                const pool = await getPool({ host, port, user, password, database });
+                const pool = await getPool(driver, { host, port, user, password, database });
+
+                if (driver === 'postgres') {
+                    const text = toPositionalParams(query);
+                    const result = await pool.query(text, payload.params || []);
+                    console.log('[Result] Row count:', result.rowCount, 'Rows returned:', result.rows.length);
+
+                    if (/^\s*(INSERT|UPDATE|DELETE)/i.test(query)) {
+                        // With RETURNING <pk> (see QueryBuilder:insert), the first
+                        // column of the first returned row is the new row's id.
+                        const insertId = result.rows.length > 0 ? Object.values(result.rows[0])[0] : 0;
+                        res.writeHead(200);
+                        res.end(JSON.stringify({
+                            insertId: insertId || 0,
+                            affectedRows: result.rowCount || 0
+                        }));
+                    } else {
+                        res.writeHead(200);
+                        res.end(JSON.stringify(result.rows));
+                    }
+                    return;
+                }
+
                 const connection = await pool.getConnection();
-                
+
                 try {
                     const [rows] = await connection.query(query);
                     console.log('[Result] Affected rows:', rows.affectedRows || 0, 'Rows returned:', Array.isArray(rows) ? rows.length : 0);
-                    
+
                     // For INSERT/UPDATE/DELETE queries, return metadata
                     if (rows.insertId !== undefined || rows.affectedRows !== undefined) {
                         res.writeHead(200);
@@ -91,8 +134,9 @@ const server = http.createServer(async (req, res) => {
             try {
                 const payload = JSON.parse(body);
                 const queries = payload.queries;
+                const driver = payload.driver || 'mysql';
                 const host = payload.host || 'localhost';
-                const port = payload.port || 3306;
+                const port = payload.port || (driver === 'postgres' ? 5432 : 3306);
                 const user = payload.user || 'root';
                 const password = payload.password || '';
                 const database = payload.database || 'fivem';
@@ -105,7 +149,34 @@ const server = http.createServer(async (req, res) => {
 
                 console.log('[Transaction]', queries.length, 'statement(s)');
 
-                const pool = await getPool({ host, port, user, password, database });
+                const pool = await getPool(driver, { host, port, user, password, database });
+
+                if (driver === 'postgres') {
+                    const client = await pool.connect();
+                    try {
+                        await client.query('BEGIN');
+                        for (const item of queries) {
+                            const text = toPositionalParams(item.query);
+                            await client.query(text, item.values || []);
+                        }
+                        await client.query('COMMIT');
+                        res.writeHead(200);
+                        res.end(JSON.stringify({ success: true }));
+                    } catch (error) {
+                        try {
+                            await client.query('ROLLBACK');
+                        } catch (rollbackError) {
+                            console.error('Rollback error:', rollbackError.message);
+                        }
+                        console.error('Transaction error:', error.message);
+                        res.writeHead(500);
+                        res.end(JSON.stringify({ success: false, error: error.message }));
+                    } finally {
+                        client.release();
+                    }
+                    return;
+                }
+
                 const connection = await pool.getConnection();
 
                 // All statements run on this single connection inside one
