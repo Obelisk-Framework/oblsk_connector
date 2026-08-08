@@ -19,6 +19,11 @@ const getPool = async (driver, config) => {
                 port: config.port,
                 max: 10
             });
+            // Without this listener, an idle client dying (e.g. Postgres
+            // restart, idle-in-transaction timeout) becomes an unhandled
+            // 'error' event and crashes the whole Node process, taking the
+            // MySQL side of this sidecar down with it.
+            pools[key].on('error', (err) => console.error('[pg pool] idle client error:', err.message));
         } else {
             pools[key] = mysql.createPool({
                 host: config.host,
@@ -77,13 +82,26 @@ const server = http.createServer(async (req, res) => {
 
                 if (driver === 'postgres') {
                     const text = toPositionalParams(query);
-                    const result = await pool.query(text, payload.params || []);
+                    // FiveM's json.encode can't distinguish an empty Lua
+                    // table from an empty JSON object, so an empty params
+                    // table can arrive on the wire as `{}` — guard with
+                    // Array.isArray rather than truthiness, since `pg`
+                    // throws on a non-array values argument.
+                    const values = Array.isArray(payload.params) ? payload.params : [];
+                    const result = await pool.query(text, values);
                     console.log('[Result] Row count:', result.rowCount, 'Rows returned:', result.rows.length);
 
                     if (/^\s*(INSERT|UPDATE|DELETE)/i.test(query)) {
                         // With RETURNING <pk> (see QueryBuilder:insert), the first
                         // column of the first returned row is the new row's id.
-                        const insertId = result.rows.length > 0 ? Object.values(result.rows[0])[0] : 0;
+                        const rawInsertId = result.rows.length > 0 ? Object.values(result.rows[0])[0] : 0;
+                        // `pg` returns int8/bigint columns as strings to avoid
+                        // precision loss beyond Number.MAX_SAFE_INTEGER. Coerce
+                        // to a number when that's safe (the common case for
+                        // serial/int primary keys); fall back to the raw value
+                        // (string or otherwise) for genuinely huge bigints.
+                        const numericInsertId = Number(rawInsertId);
+                        const insertId = Number.isSafeInteger(numericInsertId) ? numericInsertId : rawInsertId;
                         res.writeHead(200);
                         res.end(JSON.stringify({
                             insertId: insertId || 0,
@@ -157,7 +175,8 @@ const server = http.createServer(async (req, res) => {
                         await client.query('BEGIN');
                         for (const item of queries) {
                             const text = toPositionalParams(item.query);
-                            await client.query(text, item.values || []);
+                            const vals = Array.isArray(item.values) ? item.values : [];
+                            await client.query(text, vals);
                         }
                         await client.query('COMMIT');
                         res.writeHead(200);

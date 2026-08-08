@@ -44,22 +44,27 @@ local function parseConnectionString(connectionString)
     end
 
     local config = {}
-    local userPass, hostPath = connectionString:match('mysql://([^@]+)@(.+)')
-    
+    local scheme, userPass, hostPath = connectionString:match('^(%a+)://([^@]+)@(.+)$')
+
+    local defaultPort = 3306
+    if scheme == 'postgres' or scheme == 'postgresql' then
+        defaultPort = 5432
+    end
+
     if userPass then
         config.user, config.password = userPass:match('([^:]+):(.+)')
     end
-    
+
     if hostPath then
         local hostPort, database = hostPath:match('([^/]+)/(.+)')
         if hostPort then
             local host, port = hostPort:match('([^:]+):?(%d*)')
             config.host = host
-            config.port = tonumber(port) or 3306
+            config.port = tonumber(port) or defaultPort
             config.database = database
         end
     end
-    
+
     return config
 end
 
@@ -78,7 +83,7 @@ function MySQL.executeSync(query, params)
 
     local payload = json.encode({
         query = outgoingQuery,
-        params = isPostgres and (params or {}) or nil,
+        params = (isPostgres and params and #params > 0) and params or nil,
         driver = MySQL.config.driver,
         host = MySQL.config.host,
         port = MySQL.config.port,
@@ -173,9 +178,10 @@ local function transactionSync(queries)
     for _, item in ipairs(queries) do
         if isPostgres then
             if type(item) == 'table' then
-                statements[#statements + 1] = { query = item.query, values = item.values or {} }
+                local values = (item.values and #item.values > 0) and item.values or nil
+                statements[#statements + 1] = { query = item.query, values = values }
             else
-                statements[#statements + 1] = { query = tostring(item), values = {} }
+                statements[#statements + 1] = { query = tostring(item), values = nil }
             end
         elseif type(item) == 'table' then
             statements[#statements + 1] = parseQuery(item.query, item.values)
@@ -232,6 +238,14 @@ end
 local function init()
     MySQL.config.driver = GetConvar('db_driver', 'mysql')
     Connector.config.driver = MySQL.config.driver
+
+    -- The hardcoded top-of-file default (3306) is MySQL-shaped; if the
+    -- driver is postgres and nothing below overrides the port, fall back
+    -- to postgres' own default instead of silently staying on 3306.
+    if (MySQL.config.driver == 'postgres' or MySQL.config.driver == 'postgresql') and MySQL.config.port == 3306 then
+        MySQL.config.port = 5432
+        Connector.config.port = 5432
+    end
 
     local connectionString = GetConvar('mysql_connection_string', '')
 
