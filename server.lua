@@ -67,21 +67,27 @@ function MySQL.executeSync(query, params)
     if not query or query == '' then
         return {}
     end
-    
-    local parsedQuery = parseQuery(query, params)
+
+    local isPostgres = MySQL.config.driver == 'postgres'
+    -- MySQL path: escape + interpolate client-side (unchanged behavior).
+    -- Postgres path: send the raw '?'-placeholder query + unescaped params;
+    -- index.js translates placeholders and lets `pg` bind them for real.
+    local outgoingQuery = isPostgres and query or parseQuery(query, params)
     local result = {}
     local requestDone = false
-    
+
     local payload = json.encode({
-        query = parsedQuery,
+        query = outgoingQuery,
+        params = isPostgres and (params or {}) or nil,
+        driver = MySQL.config.driver,
         host = MySQL.config.host,
         port = MySQL.config.port,
         user = MySQL.config.user,
         password = MySQL.config.password,
         database = MySQL.config.database
     })
-    
-    print('[oblsk_connector] Executing query: ' .. parsedQuery:sub(1, 100))
+
+    print('[oblsk_connector] Executing query: ' .. outgoingQuery:sub(1, 100))
     
     PerformHttpRequest('http://127.0.0.1:3000/query', function(statusCode, response, headers)
         if statusCode == 200 then
@@ -162,9 +168,16 @@ local function transactionSync(queries)
         return true
     end
 
+    local isPostgres = MySQL.config.driver == 'postgres'
     local statements = {}
     for _, item in ipairs(queries) do
-        if type(item) == 'table' then
+        if isPostgres then
+            if type(item) == 'table' then
+                statements[#statements + 1] = { query = item.query, values = item.values or {} }
+            else
+                statements[#statements + 1] = { query = tostring(item), values = {} }
+            end
+        elseif type(item) == 'table' then
             statements[#statements + 1] = parseQuery(item.query, item.values)
         else
             statements[#statements + 1] = tostring(item)
@@ -176,6 +189,7 @@ local function transactionSync(queries)
 
     local payload = json.encode({
         queries = statements,
+        driver = MySQL.config.driver,
         host = MySQL.config.host,
         port = MySQL.config.port,
         user = MySQL.config.user,
@@ -216,8 +230,11 @@ local function transactionSync(queries)
 end
 
 local function init()
+    MySQL.config.driver = GetConvar('db_driver', 'mysql')
+    Connector.config.driver = MySQL.config.driver
+
     local connectionString = GetConvar('mysql_connection_string', '')
-    
+
     if connectionString ~= '' then
         local parsed = parseConnectionString(connectionString)
         if parsed then
