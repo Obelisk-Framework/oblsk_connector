@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { assertExpectedAffectedRows } = require('./transaction-invariants');
+const { assertExpectedAffectedRows } = require('../transaction-invariants');
 
 test('queries without an affected-row invariant pass through', () => {
     assert.doesNotThrow(() => assertExpectedAffectedRows({ query: 'SELECT 1' }, undefined));
