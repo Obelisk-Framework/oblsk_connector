@@ -179,12 +179,19 @@ local function transactionSync(queries)
         if isPostgres then
             if type(item) == 'table' then
                 local values = (item.values and #item.values > 0) and item.values or nil
-                statements[#statements + 1] = { query = item.query, values = values }
+                statements[#statements + 1] = {
+                    query = item.query,
+                    values = values,
+                    expectedAffectedRows = item.expectedAffectedRows,
+                }
             else
                 statements[#statements + 1] = { query = tostring(item), values = nil }
             end
         elseif type(item) == 'table' then
-            statements[#statements + 1] = parseQuery(item.query, item.values)
+            statements[#statements + 1] = {
+                query = parseQuery(item.query, item.values),
+                expectedAffectedRows = item.expectedAffectedRows,
+            }
         else
             statements[#statements + 1] = tostring(item)
         end

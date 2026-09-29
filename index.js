@@ -1,6 +1,7 @@
 const http = require('http');
 const mysql = require('mysql2/promise');
 const { Pool: PgPool } = require('pg');
+const { assertExpectedAffectedRows } = require('./transaction-invariants');
 
 const PORT = process.env.MYSQL_SERVER_PORT || 3000;
 
@@ -176,7 +177,8 @@ const server = http.createServer(async (req, res) => {
                         for (const item of queries) {
                             const text = toPositionalParams(item.query);
                             const vals = Array.isArray(item.values) ? item.values : [];
-                            await client.query(text, vals);
+                            const result = await client.query(text, vals);
+                            assertExpectedAffectedRows(item, result.rowCount);
                         }
                         await client.query('COMMIT');
                         res.writeHead(200);
@@ -204,7 +206,8 @@ const server = http.createServer(async (req, res) => {
                     await connection.beginTransaction();
                     for (const item of queries) {
                         const sql = typeof item === 'string' ? item : item.query;
-                        await connection.query(sql);
+                        const [result] = await connection.query(sql);
+                        assertExpectedAffectedRows(item, result.affectedRows);
                     }
                     await connection.commit();
                     res.writeHead(200);
